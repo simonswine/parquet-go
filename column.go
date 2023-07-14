@@ -1,6 +1,7 @@
 package parquet
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -101,7 +102,7 @@ func (c *Column) Pages() Pages {
 		pages: make([]filePages, len(c.file.rowGroups)),
 	}
 	for i := range r.pages {
-		r.pages[i].init(c.file.rowGroups[i].(*fileRowGroup).columns[c.index].(*fileColumnChunk))
+		r.pages[i].init(context.TODO(), c.file.rowGroups[i].(*fileRowGroup).columns[c.index].(*fileColumnChunk), nil)
 	}
 	return r
 }

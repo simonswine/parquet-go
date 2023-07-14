@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -455,8 +456,12 @@ func (c *fileColumnChunk) Column() int {
 }
 
 func (c *fileColumnChunk) Pages() Pages {
+	return c.PagesWithReaderSectioner(context.TODO(), nil)
+}
+
+func (c *fileColumnChunk) PagesWithReaderSectioner(ctx context.Context, readerSectioner ReaderSectioner) Pages {
 	r := new(filePages)
-	r.init(c)
+	r.init(ctx, c, readerSectioner)
 	return r
 }
 
@@ -489,7 +494,7 @@ type filePages struct {
 	chunk    *fileColumnChunk
 	rbuf     *bufio.Reader
 	rbufpool *sync.Pool
-	section  io.SectionReader
+	section  FileReader
 
 	protocol thrift.CompactProtocol
 	decoder  thrift.Decoder
@@ -504,7 +509,14 @@ type filePages struct {
 	bufferSize int
 }
 
-func (f *filePages) init(c *fileColumnChunk) {
+type ReaderSectioner func(ctx context.Context, offset, length int64) FileReader
+
+type FileReader interface {
+	io.Reader
+	io.Seeker
+}
+
+func (f *filePages) init(ctx context.Context, c *fileColumnChunk, readerSectioner ReaderSectioner) {
 	f.chunk = c
 	f.baseOffset = c.chunk.MetaData.DataPageOffset
 	f.dataOffset = f.baseOffset
@@ -515,8 +527,13 @@ func (f *filePages) init(c *fileColumnChunk) {
 		f.dictOffset = f.baseOffset
 	}
 
-	f.section = *io.NewSectionReader(c.file, f.baseOffset, c.chunk.MetaData.TotalCompressedSize)
-	f.rbuf, f.rbufpool = getBufioReader(&f.section, f.bufferSize)
+	if readerSectioner == nil {
+		f.section = io.NewSectionReader(c.file, f.baseOffset, c.chunk.MetaData.TotalCompressedSize)
+	} else {
+		f.section = readerSectioner(ctx, f.baseOffset, c.chunk.MetaData.TotalCompressedSize)
+	}
+
+	f.rbuf, f.rbufpool = getBufioReader(f.section, f.bufferSize)
 	f.decoder.Reset(f.protocol.NewReader(f.rbuf))
 }
 
@@ -704,14 +721,14 @@ func (f *filePages) SeekToRow(rowIndex int64) (err error) {
 		f.skip = rowIndex - pages[index].FirstRowIndex
 		f.index = index
 	}
-	f.rbuf.Reset(&f.section)
+	f.rbuf.Reset(f.section)
 	return err
 }
 
 func (f *filePages) Close() error {
 	putBufioReader(f.rbuf, f.rbufpool)
 	f.chunk = nil
-	f.section = io.SectionReader{}
+	f.section = &io.SectionReader{}
 	f.rbuf = nil
 	f.rbufpool = nil
 	f.baseOffset = 0
